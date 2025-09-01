@@ -1,3 +1,20 @@
+# --- debug startup (optioneel, helpt bij Render-problemen) ---
+import sys, pkgutil, logging
+logging.basicConfig(level=logging.INFO)
+logging.getLogger("uvicorn.error").info("sys.path = %s", sys.path)
+mods = {m.name for m in pkgutil.iter_modules()}
+logging.getLogger("uvicorn.error").info("Heeft OCP in modules? %s", "OCP" in mods)
+# -------------------------------------------------------------
+
+from fastapi import FastAPI, UploadFile, File, HTTPException
+# Belangrijk: alleen de 'OCP' variant gebruiken
+from OCP.STEPControl import STEPControl_Reader
+from OCP.IFSelect import IFSelect_RetDone
+from OCP.TopAbs import TopAbs_ShapeEnum
+from OCP.BRepGProp import BRepGProp
+from OCP.GProp import GProp_GProps
+from OCP.TopoDS import TopoDS_Shape
+
 # app.py
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
