@@ -4,13 +4,13 @@ from fastapi.responses import JSONResponse
 from typing import Optional
 import tempfile, os, requests
 
-# OpenCascade / pythonocc
-from OCC.Core.STEPControl import STEPControl_Reader
-from OCC.Core.IFSelect import IFSelect_RetDone
-from OCC.Core.Bnd import Bnd_Box
-from OCC.Core.BRepBndLib import brepbndlib_Add
-from OCC.Core.BRepGProp import brepgprop_VolumeProperties
-from OCC.Core.GProp import GProp_GProps
+# OpenCascade via OCP (vervangt pythonocc-core)
+from OCP.STEPControl import STEPControl_Reader
+from OCP.IFSelect import IFSelect_RetDone
+from OCP.Bnd import Bnd_Box
+from OCP.BRepBndLib import brepbndlib_Add
+from OCP.BRepGProp import brepgprop_VolumeProperties
+from OCP.GProp import GProp_GProps
 
 app = FastAPI(title="STEP Analyzer", version="1.0.0")
 
