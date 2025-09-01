@@ -1,15 +1,18 @@
-FROM python:3.11-slim
+# Micromamba (Conda) image — lichtgewicht en ideaal voor conda-forge packages
+FROM mambaorg/micromamba:1.5.8
 
-# libs die pythonocc nodig heeft
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 libglu1-mesa libxrender1 libxext6 libsm6 libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+# Maak de env vanuit environment.yml
+COPY --chown=$MAMBA_USER:$MAMBA_USER environment.yml /tmp/environment.yml
+RUN micromamba install -y -n base -f /tmp/environment.yml && \
+    micromamba clean -a -y
 
+# App files
 WORKDIR /app
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
+COPY --chown=$MAMBA_USER:$MAMBA_USER . .
 
-# Render geeft een PORT env var; gebruik die, fallback 8080
+# Render geeft PORT mee; fallback op 8080
+ENV PORT=8080
 EXPOSE 8080
-CMD ["sh","-c","uvicorn app:app --host 0.0.0.0 --port ${PORT:-8080}"]
+
+# Start via de conda (base) omgeving
+CMD ["/bin/bash", "-lc", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8080}"]
