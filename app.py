@@ -1,13 +1,14 @@
 import os
 import logging
 from typing import Dict, Any, Optional
+from urllib.parse import urlsplit, urlunsplit, quote, quote_plus
 
 import requests
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel  # HttpUrl verwijderd
 
-app = FastAPI(title="STEP Analyzer", version="1.3.0")
+app = FastAPI(title="STEP Analyzer", version="1.3.1")
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("step-analyzer")
 
@@ -22,7 +23,7 @@ app.add_middleware(
 
 # ===== Pydantic model voor analyze-url =====
 class AnalyzeUrlRequest(BaseModel):
-    file_url: HttpUrl
+    file_url: str                       # was HttpUrl -> str
     material: Optional[str] = "steel"
     density_kg_m3: Optional[float] = None
 
@@ -215,6 +216,23 @@ def _analyze_shape(
     }
 
 
+# ===== URL normalizer =====
+def _normalize_url(raw: str) -> str:
+    raw = (raw or "").strip()
+    # GitHub blob → raw
+    if raw.startswith("https://github.com/") and "/blob/" in raw:
+        raw = raw.replace("https://github.com/", "https://raw.githubusercontent.com/").replace("/blob/", "/")
+    # OneDrive: forceer download
+    if ("1drv.ms" in raw or "onedrive.live.com" in raw) and "download=1" not in raw:
+        sep = "&" if "?" in raw else "?"
+        raw = f"{raw}{sep}download=1"
+    # Encode pad en query; schema/host blijven
+    sp = urlsplit(raw)
+    safe_path  = quote(sp.path, safe="/%:@")
+    safe_query = quote_plus(sp.query, safe="=&:%@")
+    return urlunsplit((sp.scheme, sp.netloc, safe_path, safe_query, sp.fragment))
+
+
 # ====== Analyze via URL (JSON) ======
 @app.post("/analyze-url")
 def analyze_step_url(body: AnalyzeUrlRequest):
@@ -227,16 +245,12 @@ def analyze_step_url(body: AnalyzeUrlRequest):
             "User-Agent": "step-analyzer/1.0 (+https://step-analyzer.onrender.com)",
             "Accept": "*/*",
         }
-        resp = requests.get(
-            str(body.file_url),
-            headers=headers,
-            timeout=45,
-            allow_redirects=True,
-        )
+        url = _normalize_url(body.file_url)
+        resp = requests.get(url, headers=headers, timeout=45, allow_redirects=True)
         if resp.status_code != 200:
             raise HTTPException(
                 status_code=400,
-                detail=f"Download mislukt: HTTP {resp.status_code} voor URL {body.file_url}",
+                detail=f"Download mislukt: HTTP {resp.status_code} voor URL {url}",
             )
         data = resp.content
 
@@ -260,7 +274,7 @@ def analyze_step_url(body: AnalyzeUrlRequest):
         occ = _need_occ()
         shape = _read_step_shape(occ, data)
         result = _analyze_shape(occ, shape, body.material or "steel", body.density_kg_m3)
-        result["source"] = str(body.file_url)
+        result["source"] = url
         return result
     except HTTPException:
         raise
