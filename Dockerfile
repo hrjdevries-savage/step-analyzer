@@ -1,34 +1,16 @@
-# Lichtgewicht Python + system libs die OCC nodig heeft
-FROM python:3.11-slim
+FROM mambaorg/micromamba:1.5.8
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
-
-# Basislibs voor OpenCascade rendering/box berekening (zonder X-server)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libgl1 \
-    libglu1-mesa \
-    libxrender1 \
-    libxext6 \
-    libxi6 \
-  && rm -rf /var/lib/apt/lists/*
+# Snellere, kleinere env-install
+COPY --chown=$MAMBA_USER:$MAMBA_USER environment.yml /tmp/environment.yml
+RUN micromamba install -y -n base -f /tmp/environment.yml && \
+    micromamba clean -a -y
 
 WORKDIR /app
+COPY --chown=$MAMBA_USER:$MAMBA_USER . .
 
-# Eerst requirements voor betere caching
-COPY requirements.txt ./
-
-# pip 23.x is wat toleranter; 24/25 triggert de OCP-marker bug die we nu vermijden.
-RUN python -m pip install --upgrade "pip<24" \
- && pip --version \
- && pip install --no-cache-dir -r requirements.txt
-
-# Dan je code
-COPY . .
-
-# Render levert PORT; fallback naar 10000
+# Render geeft PORT mee; fallback voor lokaal
 ENV PORT=10000
+EXPOSE 10000
 
-# Uvicorn starten
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "10000"]
+# Start de API
+CMD ["bash", "-lc", "uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
