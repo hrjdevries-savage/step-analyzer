@@ -1,122 +1,130 @@
-# --- debug startup (optioneel, helpt bij Render-problemen) ---
-import sys, pkgutil, logging
-logging.basicConfig(level=logging.INFO)
-logging.getLogger("uvicorn.error").info("sys.path = %s", sys.path)
-mods = {m.name for m in pkgutil.iter_modules()}
-logging.getLogger("uvicorn.error").info("Heeft OCP in modules? %s", "OCP" in mods)
-# -------------------------------------------------------------
-
-from fastapi import FastAPI, UploadFile, File, HTTPException
-# Belangrijk: alleen de 'OCP' variant gebruiken
-from OCP.STEPControl import STEPControl_Reader
-from OCP.IFSelect import IFSelect_RetDone
-from OCP.TopAbs import TopAbs_ShapeEnum
-from OCP.BRepGProp import BRepGProp
-from OCP.GProp import GProp_GProps
-from OCP.TopoDS import TopoDS_Shape
-
-# app.py
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
-import requests
-import tempfile
+import io
 import os
+import tempfile
+from typing import Optional
 
-# --- OpenCascade imports ---
-from OCP.STEPControl import STEPControl_Reader
-from OCP.IFSelect import IFSelect_RetDone
-from OCP.Bnd import Bnd_Box
-from OCP.BRepBndLib import brepbndlib_Add
-from OCP.BRepGProp import brepgprop_VolumeProperties
-from OCP.GProp import GProp_GProps
-from OCP.TopoDS import TopoDS_Shape
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import JSONResponse, PlainTextResponse
 
-# --- FastAPI setup ---
-app = FastAPI(title="STEP Analyzer")
+app = FastAPI(title="STEP Analyzer", version="1.0.0")
 
-# CORS volledig open voor demo/test
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+@app.get("/", response_class=PlainTextResponse)
+def root() -> str:
+    return "STEP Analyzer is running. See /healthz and POST /analyze"
+
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True}
+    """
+    Simpele healthcheck die ook controleert of OCP importeerbaar is.
+    """
+    ocp_ok = False
+    ocp_error: Optional[str] = None
+    try:
+        import OCP  # noqa: F401
+        from OCP.STEPControl import STEPControl_Reader  # noqa: F401
+        ocp_ok = True
+    except Exception as e:  # pragma: no cover
+        ocp_error = repr(e)
 
-# --- STEP analyse helpers ---
-def _load_step(path: str) -> TopoDS_Shape:
-    """Laadt een STEP-bestand en geeft een TopoDS_Shape terug."""
-    reader = STEPControl_Reader()
-    status = reader.ReadFile(path)
-    if status != IFSelect_RetDone:
-        raise HTTPException(status_code=400, detail="STEP-bestand kan niet worden gelezen.")
-    reader.TransferRoots()
-    return reader.OneShape()
-
-def _bounding_box_mm(shape: TopoDS_Shape):
-    """Bereken bounding box (mm)."""
-    box = Bnd_Box()
-    brepbndlib_Add(shape, box, True)
-    xmin, ymin, zmin, xmax, ymax, zmax = box.Get()
-    return max(xmax - xmin, 0.0), max(ymax - ymin, 0.0), max(zmax - zmin, 0.0)
-
-def _volume_m3(shape: TopoDS_Shape):
-    """Bereken volume (m³)."""
-    props = GProp_GProps()
-    brepgprop_VolumeProperties(shape, props)
-    volume_mm3 = props.Mass()
-    return max(volume_mm3, 0.0) * 1e-9  # mm³ → m³
-
-def _analyze_step(path: str, density: Optional[float]):
-    shape = _load_step(path)
-    L, W, H = _bounding_box_mm(shape)
-    volume = _volume_m3(shape)
-    result = {
-        "length_mm": round(L, 3),
-        "width_mm": round(W, 3),
-        "height_mm": round(H, 3),
-        "volume_m3": round(volume, 9),
+    return {
+        "status": "ok" if ocp_ok else "degraded",
+        "ocp_import": ocp_ok,
+        "ocp_error": ocp_error,
+        "version": app.version,
     }
-    if density is not None:
-        result["weight_kg"] = round(volume * density, 3)
-    return result
 
-# --- API Endpoints ---
+
 @app.post("/analyze")
-async def analyze(url: Optional[str] = None, density: Optional[float] = None, file: UploadFile = File(None)):
+async def analyze_step(file: UploadFile = File(...)):
     """
-    Analyseer een STEP-bestand:
-    - POST /analyze?url=https://example.com/part.step&density=7850
-    - of upload multipart: file=@part.step
+    Upload een .step/.stp bestand en krijg basisinformatie terug.
     """
-    if not url and not file:
-        raise HTTPException(status_code=400, detail="Geef 'url' of upload 'file'.")
+    filename = file.filename or "upload.step"
+    if not filename.lower().endswith((".step", ".stp")):
+        raise HTTPException(
+            status_code=400,
+            detail="Bestand moet .step of .stp zijn."
+        )
 
-    with tempfile.TemporaryDirectory() as tmp:
-        step_path = os.path.join(tmp, "part.step")
+    # Probeer OCP pas hier te importeren (fijnere foutmelding naar de client)
+    try:
+        from OCP.STEPControl import STEPControl_Reader
+        from OCP.IFSelect import IFSelect_RetDone
+        from OCP.TopAbs import TopAbs_ShapeEnum
+        from OCP.TopoDS import TopoDS_Shape
+        from OCP.BRepTools import BRepTools
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"OCP (OpenCascade) kon niet geïmporteerd worden: {e!r}"
+        )
 
-        # Download van URL
-        if url:
+    # Sla upload tijdelijk op schijf (STEP-reader verwacht een pad)
+    try:
+        contents = await file.read()
+    finally:
+        await file.close()
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".stp", delete=False) as tmp:
+            tmp.write(contents)
+            tmp_path = tmp.name
+
+        # Lees STEP
+        reader = STEPControl_Reader()
+        status = reader.ReadFile(tmp_path)
+
+        if status != IFSelect_RetDone:
+            raise HTTPException(
+                status_code=400,
+                detail=f"STEP lezen mislukt: status={int(status)}"
+            )
+
+        ok = reader.TransferRoots()
+        if ok == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Geen shapes getransfereerd uit STEP."
+            )
+
+        # Pak het hoofdshape
+        shape: TopoDS_Shape = reader.OneShape()
+
+        # Eenvoudige metrics: serialiseer naar BREP in-memory en meet grootte
+        brep_buf = io.StringIO()
+        # BRepTools::Write schrijft naar file; daarom even naar tijdelijk bestand
+        with tempfile.NamedTemporaryFile(suffix=".brep", delete=False) as brep_tmp:
+            brep_path = brep_tmp.name
+        try:
+            BRepTools.Write(shape, brep_path)
+            brep_size = os.path.getsize(brep_path)
+        finally:
             try:
-                r = requests.get(url, timeout=30)
-                if r.status_code != 200:
-                    raise HTTPException(status_code=400, detail=f"Download faalde (HTTP {r.status_code}): {url}")
-                with open(step_path, "wb") as f:
-                    f.write(r.content)
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Download faalde van {url}. Fout: {str(e)}")
+                os.remove(brep_path)
+            except OSError:
+                pass
 
-        # Uploadbestand verwerken
-        elif file:
-            data = await file.read()
-            if not data:
-                raise HTTPException(status_code=400, detail="Geüpload bestand is leeg.")
-            with open(step_path, "wb") as f:
-                f.write(data)
+        # Antwoord
+        return JSONResponse({
+            "filename": filename,
+            "transfer_ok": bool(ok),
+            "brep_size_bytes": int(brep_size),
+            "message": "STEP succesvol gelezen."
+        })
 
-        return _analyze_step(step_path, density)
+    finally:
+        # Opruimen
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+# Alleen voor lokaal testen (Render gebruikt CMD uit Dockerfile)
+if __name__ == "__main__":  # pragma: no cover
+    import uvicorn
+
+    port = int(os.environ.get("PORT", "8000"))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
