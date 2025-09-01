@@ -6,18 +6,29 @@ import requests
 import tempfile
 import os
 
-# OCP (OpenCascade) imports
-from OCP.STEPControl import STEPControl_Reader
-from OCP.IFSelect import IFSelect_RetDone
-from OCP.Bnd import Bnd_Box
-from OCP.BRepBndLib import brepbndlib_Add
-from OCP.GProp import GProp_GProps
-from OCP.BRepGProp import brepgprop_VolumeProperties
-from OCP.TopoDS import TopoDS_Shape
+# --- OpenCascade imports met fallback ---
+try:
+    from OCP.STEPControl import STEPControl_Reader
+    from OCP.IFSelect import IFSelect_RetDone
+    from OCP.Bnd import Bnd_Box
+    from OCP.BRepBndLib import brepbndlib_Add
+    from OCP.BRepGProp import brepgprop_VolumeProperties
+    from OCP.GProp import GProp_GProps
+    from OCP.TopoDS import TopoDS_Shape
+except ModuleNotFoundError:
+    # Sommige wheels gebruiken een 'ocp.' namespace
+    from ocp.OCP.STEPControl import STEPControl_Reader
+    from ocp.OCP.IFSelect import IFSelect_RetDone
+    from ocp.OCP.Bnd import Bnd_Box
+    from ocp.OCP.BRepBndLib import brepbndlib_Add
+    from ocp.OCP.BRepGProp import brepgprop_VolumeProperties
+    from ocp.OCP.GProp import GProp_GProps
+    from ocp.OCP.TopoDS import TopoDS_Shape
 
+# --- FastAPI setup ---
 app = FastAPI(title="STEP Analyzer")
 
-# CORS openzetten voor demo
+# CORS volledig open voor demo/test
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,77 +37,85 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True}
 
-def _load_step_to_shape(path: str) -> TopoDS_Shape:
+
+# --- STEP analyse helpers ---
+def _load_step(path: str) -> TopoDS_Shape:
+    """Laadt een STEP-bestand en geeft een TopoDS_Shape terug."""
     reader = STEPControl_Reader()
     status = reader.ReadFile(path)
     if status != IFSelect_RetDone:
-        raise HTTPException(status_code=400, detail="STEP bestand kan niet gelezen worden.")
+        raise HTTPException(status_code=400, detail="STEP-bestand kan niet worden gelezen.")
     reader.TransferRoots()
     return reader.OneShape()
 
-def _bbox_mm(shape: TopoDS_Shape):
+
+def _bounding_box_mm(shape: TopoDS_Shape):
+    """Bereken bounding box (mm)."""
     box = Bnd_Box()
     brepbndlib_Add(shape, box, True)
     xmin, ymin, zmin, xmax, ymax, zmax = box.Get()
-    # OCC werkt in millimeters
-    length = (xmax - xmin)
-    width  = (ymax - ymin)
-    height = (zmax - zmin)
-    return max(length, 0.0), max(width, 0.0), max(height, 0.0)
+    return max(xmax - xmin, 0.0), max(ymax - ymin, 0.0), max(zmax - zmin, 0.0)
 
-def _volume_m3(shape: TopoDS_Shape) -> float:
+
+def _volume_m3(shape: TopoDS_Shape):
+    """Bereken volume (m³)."""
     props = GProp_GProps()
     brepgprop_VolumeProperties(shape, props)
-    vol_mm3 = props.Mass()  # in OCC: Mass() = volume voor solids
-    return max(vol_mm3, 0.0) * 1e-9  # mm³ -> m³
+    volume_mm3 = props.Mass()
+    return max(volume_mm3, 0.0) * 1e-9  # mm³ → m³
 
-def _analyze_step_file(path: str, density: Optional[float]):
-    shape = _load_step_to_shape(path)
-    L, W, H = _bbox_mm(shape)  # mm
-    volume_m3 = _volume_m3(shape)
+
+def _analyze_step(path: str, density: Optional[float]):
+    shape = _load_step(path)
+    L, W, H = _bounding_box_mm(shape)
+    volume = _volume_m3(shape)
     result = {
         "length_mm": round(L, 3),
-        "width_mm":  round(W, 3),
+        "width_mm": round(W, 3),
         "height_mm": round(H, 3),
-        "volume_m3": round(volume_m3, 9),
+        "volume_m3": round(volume, 9),
     }
     if density is not None:
-        # density in kg/m3
-        result["weight_kg"] = round(volume_m3 * float(density), 3)
+        result["weight_kg"] = round(volume * density, 3)
     return result
 
+
+# --- API Endpoints ---
 @app.post("/analyze")
-def analyze(url: Optional[str] = None, density: Optional[float] = None, file: UploadFile = File(None)):
+async def analyze(url: Optional[str] = None, density: Optional[float] = None, file: UploadFile = File(None)):
     """
-    Gebruik:
-    - POST /analyze?url=https://.../part.step&density=7850
-    - of multipart upload: file=@part.step
+    Analyseer een STEP-bestand:
+    - POST /analyze?url=https://example.com/part.step&density=7850
+    - of upload multipart: file=@part.step
     """
     if not url and not file:
         raise HTTPException(status_code=400, detail="Geef 'url' of upload 'file'.")
 
     with tempfile.TemporaryDirectory() as tmp:
-        step_path = os.path.join(tmp, "input.step")
+        step_path = os.path.join(tmp, "part.step")
 
+        # Download van URL
         if url:
             try:
                 r = requests.get(url, timeout=30)
                 if r.status_code != 200:
-                    raise HTTPException(status_code=400, detail=f"Download faalde (HTTP {r.status_code}) vanaf: {url}")
+                    raise HTTPException(status_code=400, detail=f"Download faalde (HTTP {r.status_code}): {url}")
                 with open(step_path, "wb") as f:
                     f.write(r.content)
-            except requests.RequestException as e:
-                raise HTTPException(status_code=400, detail=f"Download faalde vanaf: {url}. Fout: {e}")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Download faalde van {url}. Fout: {str(e)}")
 
+        # Uploadbestand verwerken
         elif file:
-            data = file.file.read()
+            data = await file.read()
             if not data:
                 raise HTTPException(status_code=400, detail="Geüpload bestand is leeg.")
             with open(step_path, "wb") as f:
                 f.write(data)
 
-        return _analyze_step_file(step_path, density)
+        return _analyze_step(step_path, density)
