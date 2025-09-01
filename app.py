@@ -18,9 +18,8 @@ def healthz():
 def _need_occ() -> Dict[str, Any]:
     """
     Probeer eerst OCP (nieuwe naam), val daarna automatisch terug op OCC.Core (pythonocc-core).
-    Geeft nette uitleg als beiden ontbreken.
     """
-    # 1) OCP (nieuwere naam; sommige distributies gebruiken dit)
+    # 1) OCP
     try:
         from OCP.STEPControl import STEPControl_Reader
         from OCP.IFSelect import IFSelect_RetDone
@@ -44,7 +43,7 @@ def _need_occ() -> Dict[str, Any]:
     except Exception:
         pass
 
-    # 2) OCC.Core (pythonocc-core via pip/conda)
+    # 2) OCC.Core (pythonocc-core)
     try:
         from OCC.Core.STEPControl import STEPControl_Reader
         from OCC.Core.IFSelect import IFSelect_RetDone
@@ -54,7 +53,6 @@ def _need_occ() -> Dict[str, Any]:
         from OCC.Core.TopAbs import TopAbs_FACE, TopAbs_EDGE
         from OCC.Core.Message import Message_ProgressRange
 
-        # kleine wrapper zodat rest van code identiek blijft
         def BRepBndLib_Add(shape, box, use_triangulation=True):
             return brepbndlib_Add(shape, box, use_triangulation)
 
@@ -74,7 +72,7 @@ def _need_occ() -> Dict[str, Any]:
             status_code=500,
             detail=(
                 "Geen OCC/OCP CAD-backend gevonden. Installeer bijv. "
-                "`pythonocc-core` (OCC) of `OCP` (OCP) in requirements.txt. "
+                "`pythonocc-core` (OCC) of `OCP` (OCP). "
                 f"Onderliggende import-fout: {type(e).__name__}: {e}"
             ),
         )
@@ -85,7 +83,6 @@ def _read_step_shape(occ: Dict[str, Any], data: bytes):
     IFSelect_RetDone = occ["IFSelect_RetDone"]
     Message_ProgressRange = occ["Message_ProgressRange"]
 
-    # naar /tmp schrijven (reader kan geen bytes direct)
     tmp = "/tmp/upload.step"
     with open(tmp, "wb") as f:
         f.write(data)
@@ -95,7 +92,6 @@ def _read_step_shape(occ: Dict[str, Any], data: bytes):
     if status != IFSelect_RetDone:
         raise HTTPException(status_code=400, detail="STEP lezen mislukte (status != RetDone).")
 
-    # sommige versies vereisen een ProgressRange arg, andere niet
     try:
         reader.TransferRoots(Message_ProgressRange())
     except TypeError:
@@ -111,21 +107,18 @@ def _stats(occ: Dict[str, Any], shape) -> Dict[str, Any]:
     Bnd_Box = occ["Bnd_Box"]
     BRepBndLib_Add = occ["BRepBndLib_Add"]
 
-    # faces tellen
     faces = 0
     ex = TopExp_Explorer(shape, TopAbs_FACE)
     while ex.More():
         faces += 1
         ex.Next()
 
-    # edges tellen
     edges = 0
     ex = TopExp_Explorer(shape, TopAbs_EDGE)
     while ex.More():
         edges += 1
         ex.Next()
 
-    # bounding box
     box = Bnd_Box()
     BRepBndLib_Add(shape, box, True)
     xmin, ymin, zmin, xmax, ymax, zmax = box.Get()
@@ -169,7 +162,7 @@ async def analyze_step(file: UploadFile = File(...)):
 
     return {
         "filename": file.filename,
-        "backend": occ["flavor"],  # 'OCC' of 'OCP' ter info
+        "backend": occ["flavor"],
         "stats": stats,
         "derived": {"largest_dimension": float(largest), "classification": classification},
     }
