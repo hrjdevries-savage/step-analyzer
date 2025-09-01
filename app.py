@@ -6,24 +6,14 @@ import requests
 import tempfile
 import os
 
-# --- OpenCascade imports met fallback ---
-try:
-    from OCP.STEPControl import STEPControl_Reader
-    from OCP.IFSelect import IFSelect_RetDone
-    from OCP.Bnd import Bnd_Box
-    from OCP.BRepBndLib import brepbndlib_Add
-    from OCP.BRepGProp import brepgprop_VolumeProperties
-    from OCP.GProp import GProp_GProps
-    from OCP.TopoDS import TopoDS_Shape
-except ModuleNotFoundError:
-    # Sommige wheels gebruiken een 'ocp.' namespace
-    from ocp.OCP.STEPControl import STEPControl_Reader
-    from ocp.OCP.IFSelect import IFSelect_RetDone
-    from ocp.OCP.Bnd import Bnd_Box
-    from ocp.OCP.BRepBndLib import brepbndlib_Add
-    from ocp.OCP.BRepGProp import brepgprop_VolumeProperties
-    from ocp.OCP.GProp import GProp_GProps
-    from ocp.OCP.TopoDS import TopoDS_Shape
+# --- OpenCascade imports ---
+from OCP.STEPControl import STEPControl_Reader
+from OCP.IFSelect import IFSelect_RetDone
+from OCP.Bnd import Bnd_Box
+from OCP.BRepBndLib import brepbndlib_Add
+from OCP.BRepGProp import brepgprop_VolumeProperties
+from OCP.GProp import GProp_GProps
+from OCP.TopoDS import TopoDS_Shape
 
 # --- FastAPI setup ---
 app = FastAPI(title="STEP Analyzer")
@@ -37,11 +27,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 @app.get("/healthz")
 def healthz():
     return {"ok": True}
-
 
 # --- STEP analyse helpers ---
 def _load_step(path: str) -> TopoDS_Shape:
@@ -53,7 +41,6 @@ def _load_step(path: str) -> TopoDS_Shape:
     reader.TransferRoots()
     return reader.OneShape()
 
-
 def _bounding_box_mm(shape: TopoDS_Shape):
     """Bereken bounding box (mm)."""
     box = Bnd_Box()
@@ -61,14 +48,12 @@ def _bounding_box_mm(shape: TopoDS_Shape):
     xmin, ymin, zmin, xmax, ymax, zmax = box.Get()
     return max(xmax - xmin, 0.0), max(ymax - ymin, 0.0), max(zmax - zmin, 0.0)
 
-
 def _volume_m3(shape: TopoDS_Shape):
     """Bereken volume (m³)."""
     props = GProp_GProps()
     brepgprop_VolumeProperties(shape, props)
     volume_mm3 = props.Mass()
     return max(volume_mm3, 0.0) * 1e-9  # mm³ → m³
-
 
 def _analyze_step(path: str, density: Optional[float]):
     shape = _load_step(path)
@@ -83,7 +68,6 @@ def _analyze_step(path: str, density: Optional[float]):
     if density is not None:
         result["weight_kg"] = round(volume * density, 3)
     return result
-
 
 # --- API Endpoints ---
 @app.post("/analyze")
